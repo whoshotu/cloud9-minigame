@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strike Force Targets - Cloud9 Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0E1822;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Arial Black', sans-serif;
+        }
+        canvas {
+            box-shadow: 0 0 50px rgba(0, 163, 224, 0.3);
+            cursor: none; /* Hide default cursor to use custom crosshair */
+        }
+    </style>
+</head>
+<body>
+
+<script>
+/**
+ * STRIKE FORCE TARGETS - Cloud9 Edition
+ * A Duck Hunt style shooting game for booth displays.
+ */
+
+const config = {
+    type: Phaser.AUTO,
+    width: 1200,
+    height: 800,
+    backgroundColor: '#0E1822',
+    physics: {
+        default: 'arcade',
+        arcade: {
+            gravity: { y: 0 },
+            debug: false
+        }
+    },
+    scene: {
+        preload: preload,
+        create: create,
+        update: update
+    }
+};
+
+const game = new Phaser.Game(config);
+
+let score = 0;
+let highscore = localStorage.getItem('c9_highscore') || 0;
+let lives = 3;
+let timer = 90;
+let combo = 0;
+let maxCombo = 0;
+let gameActive = false;
+let spawnTimer;
+let countdownTimer;
+let crosshair;
+let targets;
+let particles;
+
+// Audio System
+let audioEnabled = localStorage.getItem('c9_audio') !== 'false'; // Default ON
+let audioContext;
+let bgMusicGain;
+let bgMusicOscillators = [];
+let bgMusicPlaying = false;
+
+// Champion/Agent Data with Images
+const CHAMPIONS = [
+    // League Champions (using local assets)
+    { name: 'Jax', imageKey: 'jax', type: 'league', points: 10 },
+    { name: 'Zeri', imageKey: 'zeri', type: 'league', points: 10 },
+    { name: 'Ahri', imageKey: 'ahri', type: 'league', points: 10 },
+    { name: 'Yasuo', imageKey: 'yasuo', type: 'league', points: 10 },
+    { name: 'Jinx', imageKey: 'jinx', type: 'league', points: 10 },
+
+    // Valorant Agents (using generated graphics)
+    { name: 'Jett', imageKey: 'jett', type: 'valorant', points: 20 },
+    { name: 'Omen', imageKey: 'omen', type: 'valorant', points: 20 },
+    { name: 'Sage', imageKey: 'sage', type: 'valorant', points: 20 },
+    { name: 'Phoenix', imageKey: 'phoenix', type: 'valorant', points: 20 },
+    { name: 'Reyna', imageKey: 'reyna', type: 'valorant', points: 20 }
+];
+
+// Target Types
+const TARGET_TYPES = {
+    STANDARD: {
+        champions: CHAMPIONS.filter(c => c.type === 'league'),
+        speedMultiplier: 1,
+        scale: 1
+    },
+    FAST: {
+        champions: CHAMPIONS.filter(c => c.type === 'valorant'),
+        speedMultiplier: 1.3,
+        scale: 0.85
+    },
+    BONUS: {
+        champions: [
+            { name: 'C9', imageKey: 'c9logo', url: 'https://upload.wikimedia.org/wikipedia/commons/6/69/Cloud9_logo.svg', type: 'bonus', points: 50 }
+        ],
+        speedMultiplier: 0.7,
+        scale: 0.6,
+        isBonus: true
+    }
+};
+
+function preload() {
+    // Initialize Audio Context
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Load local League champion images
+    this.load.image('jax', './assets/Jax.png');
+    this.load.image('zeri', './assets/Zeri.png');
+    this.load.image('ahri', './assets/Ahri.png');
+    this.load.image('yasuo', './assets/Yasuo.png');
+    this.load.image('jinx', './assets/Jinx.png');
+
+    // Load local Valorant agent images
+    this.load.image('jett', './assets/Jett.png');
+    this.load.image('omen', './assets/Omen.png');
+    this.load.image('sage', './assets/Sage.png');
+    this.load.image('phoenix', './assets/Phoenix.png');
+    this.load.image('reyna', './assets/Reyna.png');
+}
+
+// ===== AUDIO SYSTEM =====
+
+// Background Music - Upbeat chiptune loop
+function playBackgroundMusic() {
+    if (!audioEnabled || bgMusicPlaying) return;
+
+    // Resume audio context (browser security)
+    if (audioContext.state === 'suspended') {
+        audioContext.resume();
+    }
+
+    bgMusicPlaying = true;
+    bgMusicGain = audioContext.createGain();
+    bgMusicGain.gain.value = 0.15;
+    bgMusicGain.connect(audioContext.destination);
+
+    // Simple 4-bar arcade melody loop
+    const melody = [
+        { note: 523.25, time: 0, duration: 0.15 },      // C5
+        { note: 659.25, time: 0.2, duration: 0.15 },    // E5
+        { note: 783.99, time: 0.4, duration: 0.15 },    // G5
+        { note: 1046.50, time: 0.6, duration: 0.15 },   // C6
+        { note: 783.99, time: 0.8, duration: 0.15 },    // G5
+        { note: 659.25, time: 1.0, duration: 0.15 },    // E5
+        { note: 523.25, time: 1.2, duration: 0.3 },     // C5
+    ];
+
+    function playLoop() {
+        if (!bgMusicPlaying) return;
+
+        bgMusicOscillators.forEach(osc => {
+            try { osc.stop(); } catch(e) {}
+        });
+        bgMusicOscillators = [];
+
+        melody.forEach(({ note, time, duration }) => {
+            const osc = audioContext.createOscillator();
+            osc.type = 'square';
+            osc.frequency.value = note;
+            osc.connect(bgMusicGain);
+            osc.start(audioContext.currentTime + time);
+            osc.stop(audioContext.currentTime + time + duration);
+            bgMusicOscillators.push(osc);
+        });
+
+        setTimeout(playLoop, 1400); // Loop every 1.4s
+    }
+
+    playLoop();
+}
+
+function stopBackgroundMusic(fadeOut = true) {
+    bgMusicPlaying = false;
+
+    if (bgMusicGain && fadeOut) {
+        bgMusicGain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.5);
+        setTimeout(() => {
+            bgMusicOscillators.forEach(osc => {
+                try { osc.stop(); } catch(e) {}
+            });
+            bgMusicOscillators = [];
+        }, 500);
+    } else {
+        bgMusicOscillators.forEach(osc => {
+            try { osc.stop(); } catch(e) {}
+        });
+        bgMusicOscillators = [];
+    }
+}
+
+// Hit sound - Sharp laser "pew"
+function playHitSound() {
+    if (!audioEnabled) return;
+
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(800, audioContext.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(200, audioContext.currentTime + 0.1);
+
+    gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.1);
+
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+
+    osc.start(audioContext.currentTime);
+    osc.stop(audioContext.currentTime + 0.1);
+}
+
+// Miss sound - Low buzzer
+function playMissSound() {
+    if (!audioEnabled) return;
+
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.value = 100;
+
+    gain.gain.setValueAtTime(0.2, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.3);
+
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+
+    osc.start(audioContext.currentTime);
+    osc.stop(audioContext.currentTime + 0.3);
+}
+
+// Combo sound - Rising pitch beep
+function playComboSound(comboLevel) {
+    if (!audioEnabled) return;
+
+    const baseFreq = 400 + (comboLevel * 100);
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.value = baseFreq;
+
+    gain.gain.setValueAtTime(0.2, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.15);
+
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+
+    osc.start(audioContext.currentTime);
+    osc.stop(audioContext.currentTime + 0.15);
+}
+
+// Spawn sound - Soft boop
+function playSpawnSound() {
+    if (!audioEnabled) return;
+
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.value = 300;
+
+    gain.gain.setValueAtTime(0.1, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.1);
+
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+
+    osc.start(audioContext.currentTime);
+    osc.stop(audioContext.currentTime + 0.1);
+}
+
+// Game over sound - Descending tone sequence
+function playGameOverSound() {
+    if (!audioEnabled) return;
+
+    const notes = [523.25, 392.00, 329.63, 261.63]; // C, G, E, C descending
+
+    notes.forEach((freq, i) => {
+        const osc = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+
+        osc.type = 'triangle';
+        osc.frequency.value = freq;
+
+        const startTime = audioContext.currentTime + (i * 0.2);
+        gain.gain.setValueAtTime(0.3, startTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.3);
+
+        osc.connect(gain);
+        gain.connect(audioContext.destination);
+
+        osc.start(startTime);
+        osc.stop(startTime + 0.3);
+    });
+}
+
+function create() {
+    // Generate Textures
+    const graphics = this.make.graphics();
+
+    // Crosshair Texture (Modern Tactical)
+    graphics.lineStyle(2, 0x00A3E0);
+    graphics.strokeCircle(15, 15, 12);
+    graphics.lineStyle(1, 0x00A3E0);
+    graphics.strokeCircle(15, 15, 4);
+    graphics.lineStyle(2, 0xFFFFFF);
+    graphics.moveTo(15, 0); graphics.lineTo(15, 8);
+    graphics.moveTo(15, 22); graphics.lineTo(15, 30);
+    graphics.moveTo(0, 15); graphics.lineTo(8, 15);
+    graphics.moveTo(22, 15); graphics.lineTo(30, 15);
+    graphics.generateTexture('crosshair', 30, 30);
+    graphics.clear();
+
+    // Particle Texture
+    graphics.fillStyle(0xFFFFFF);
+    graphics.fillCircle(4, 4, 4);
+    graphics.generateTexture('particle', 8, 8);
+    graphics.clear();
+
+    // Generate C9 bonus logo graphic (circle with centered C9 text)
+    const c9Graphics = this.add.graphics();
+    c9Graphics.fillStyle(0x00D9FF, 1);
+    c9Graphics.fillCircle(50, 50, 40);
+
+    const c9Text = this.add.text(50, 50, 'C9', {
+        fontSize: '48px',
+        color: '#00D9FF',
+        fontStyle: 'bold',
+        align: 'center'
+    }).setOrigin(0.5, 0.5);
+
+    // Generate texture from the graphic and text
+    const rt = this.add.renderTexture(0, 0, 100, 100);
+    rt.draw(c9Graphics, 0, 0);
+    rt.draw(c9Text, 0, 0);
+    rt.saveTexture('c9logo');
+    rt.destroy();
+    c9Graphics.destroy();
+    c9Text.destroy();
+
+    // Background Tech Grid
+    const bg = this.add.graphics();
+    bg.fillGradientStyle(0x0E1822, 0x0E1822, 0x05090D, 0x05090D, 1);
+    bg.fillRect(0, 0, 1200, 800);
+
+    // Grid lines
+    bg.lineStyle(1, 0x00A3E0, 0.1);
+    for (let i = 0; i <= 1200; i += 50) {
+        bg.moveTo(i, 0);
+        bg.lineTo(i, 800);
+    }
+    for (let i = 0; i <= 800; i += 50) {
+        bg.moveTo(0, i);
+        bg.lineTo(1200, i);
+    }
+    bg.strokePath();
+
+    // Adding some diagonal tech lines like in the image
+    bg.lineStyle(2, 0x00A3E0, 0.2);
+    bg.moveTo(0, 200); bg.lineTo(300, 0);
+    bg.moveTo(900, 800); bg.lineTo(1200, 600);
+    bg.moveTo(0, 600); bg.lineTo(200, 800);
+    bg.moveTo(1000, 0); bg.lineTo(1200, 200);
+    bg.strokePath();
+
+    // C9 Watermark
+    this.add.text(1180, 780, 'CLOUD9', {
+        fontSize: '40px',
+        color: '#ffffff',
+        alpha: 0.1
+    }).setOrigin(1, 1);
+
+    // Groups
+    targets = this.physics.add.group();
+    particles = this.add.particles(0, 0, 'particle', {
+        speed: { min: -200, max: 200 },
+        scale: { start: 1, end: 0 },
+        blendMode: 'ADD',
+        lifespan: 600,
+        emitting: false
+    });
+
+    // UI
+    this.scoreText = this.add.text(20, 20, 'SCORE: 0', { fontSize: '32px', color: '#FFF' });
+    this.timerText = this.add.text(600, 20, 'TIME: 90', { fontSize: '32px', color: '#FFF' }).setOrigin(0.5, 0);
+    this.comboText = this.add.text(20, 60, '', { fontSize: '24px', color: '#00A3E0' });
+    this.livesText = this.add.text(1180, 20, '❤️❤️❤️', { fontSize: '32px', color: '#FFF' }).setOrigin(1, 0);
+    this.highScoreText = this.add.text(20, 760, `HIGH SCORE: ${highscore}`, { fontSize: '20px', color: '#AAA' });
+
+    // Crosshair
+    crosshair = this.add.image(600, 400, 'crosshair').setDepth(100);
+
+    // Start Screen
+    showStartScreen.call(this);
+
+    // Input
+    this.input.on('pointermove', (pointer) => {
+        crosshair.x = pointer.x;
+        crosshair.y = pointer.y;
+    });
+
+    this.input.on('pointerdown', (pointer) => {
+        if (!gameActive) return;
+
+        let hit = false;
+
+        // Manual hit detection for precise feel
+        targets.getChildren().forEach(container => {
+            const distance = Phaser.Math.Distance.Between(pointer.x, pointer.y, container.x, container.y);
+            // Hit radius is 50 pixels (portrait size)
+            if (distance < 50) {
+                handleHit.call(this, container);
+                hit = true;
+            }
+        });
+
+        if (!hit) {
+            handleMiss.call(this);
+        }
+    });
+}
+
+function update() {
+    if (!gameActive) return;
+
+    // Remove targets that go off screen (top or sides)
+    targets.getChildren().forEach(container => {
+        if (container.y < -100 || container.x < -200 || container.x > 1400) {
+            handleEscape.call(this, container);
+        }
+    });
+}
+
+function showStartScreen() {
+    const overlay = this.add.rectangle(600, 400, 1200, 800, 0x000000, 0.7).setDepth(100);
+    const title = this.add.text(600, 250, 'STRIKE FORCE TARGETS', { fontSize: '64px', color: '#00A3E0' }).setOrigin(0.5).setDepth(101);
+    const subtitle = this.add.text(600, 330, 'CLOUD9 EDITION', { fontSize: '32px', color: '#FFF' }).setOrigin(0.5).setDepth(101);
+
+    // Audio toggle button
+    const audioBtn = this.add.rectangle(600, 420, 250, 60, 0x00A3E0).setInteractive().setDepth(101);
+    const audioText = this.add.text(600, 420, audioEnabled ? '🔊 Sound: ON' : '🔇 Sound: OFF', {
+        fontSize: '28px',
+        color: '#FFF'
+    }).setOrigin(0.5).setDepth(101);
+
+    audioBtn.on('pointerover', () => audioBtn.setFillStyle(0x0082B3));
+    audioBtn.on('pointerout', () => audioBtn.setFillStyle(0x00A3E0));
+
+    audioBtn.on('pointerdown', (pointer) => {
+        pointer.event.stopPropagation();
+        audioEnabled = !audioEnabled;
+        localStorage.setItem('c9_audio', audioEnabled);
+        audioText.setText(audioEnabled ? '🔊 Sound: ON' : '🔇 Sound: OFF');
+
+        // Play test sound
+        if (audioEnabled) {
+            playHitSound();
+        }
+    });
+
+    // Start button
+    const startBtn = this.add.rectangle(600, 520, 250, 60, 0x00D9FF).setInteractive().setDepth(101);
+    const startText = this.add.text(600, 520, 'CLICK TO START', {
+        fontSize: '24px',
+        color: '#000',
+        fontStyle: 'bold'
+    }).setOrigin(0.5).setDepth(101);
+
+    startBtn.on('pointerover', () => startBtn.setFillStyle(0x00A3E0));
+    startBtn.on('pointerout', () => startBtn.setFillStyle(0x00D9FF));
+
+    const instructions = this.add.text(600, 620, 'Shoot targets before they escape!\nDon\'t miss to keep your combo.', {
+        fontSize: '20px',
+        color: '#AAA',
+        align: 'center'
+    }).setOrigin(0.5).setDepth(101);
+
+    startBtn.on('pointerdown', () => {
+        overlay.destroy();
+        title.destroy();
+        subtitle.destroy();
+        audioBtn.destroy();
+        audioText.destroy();
+        startBtn.destroy();
+        startText.destroy();
+        instructions.destroy();
+        startGame.call(this);
+    });
+}
+
+function startGame() {
+    score = 0;
+    lives = 3;
+    timer = 90;
+    combo = 0;
+    gameActive = true;
+
+    this.scoreText.setText('SCORE: 0');
+    this.timerText.setText('TIME: 90');
+    this.livesText.setText('❤️❤️❤️');
+    this.comboText.setText('');
+
+    // Start background music
+    playBackgroundMusic();
+
+    spawnTarget.call(this);
+
+    countdownTimer = this.time.addEvent({
+        delay: 1000,
+        callback: () => {
+            timer--;
+            this.timerText.setText(`TIME: ${timer}`);
+            if (timer <= 0) endGame.call(this, 'TIME\'S UP!');
+        },
+        loop: true
+    });
+}
+
+function spawnTarget() {
+    if (!gameActive) return;
+
+    const roll = Math.random();
+    let type;
+    if (roll < 0.1) type = TARGET_TYPES.BONUS;
+    else if (roll < 0.3 + (score / 2000)) type = TARGET_TYPES.FAST; // Get harder as score increases
+    else type = TARGET_TYPES.STANDARD;
+
+    // Select random champion from type
+    const champion = type.champions[Math.floor(Math.random() * type.champions.length)];
+
+    const x = Phaser.Math.Between(150, 1050);
+
+    // Create champion portrait (loaded image or generated graphic)
+    const portrait = this.add.image(0, 0, champion.imageKey);
+    portrait.setDisplaySize(100, 100);
+    portrait.setData('points', champion.points);
+    portrait.setData('type', type);
+
+    // Name label centered on portrait
+    const nameText = this.add.text(0, 0, champion.name, {
+        fontSize: champion.name.length > 8 ? '12px' : '14px',
+        color: '#FFF',
+        fontStyle: 'bold',
+        align: 'center',
+        stroke: '#000000',
+        strokeThickness: 3
+    }).setOrigin(0.5);
+
+    // Container for portrait + name
+    const container = this.add.container(x, 850, [portrait, nameText]);
+    container.setSize(100, 100);
+    this.physics.world.enable(container);
+
+    // Arcing Movement - targets fly upward in smooth arcs
+    const destX = Phaser.Math.Between(100, 1100);
+    const baseDuration = 3000;
+    const duration = baseDuration / type.speedMultiplier;
+
+    // Use tweens for smooth arcing paths
+    this.tweens.add({
+        targets: container,
+        y: -150,
+        x: destX,
+        duration: duration,
+        ease: 'Sine.easeInOut'
+    });
+
+    targets.add(container);
+
+    // Play spawn sound
+    playSpawnSound();
+
+    // Spawn next - faster spawning as score increases
+    const nextDelay = Math.max(500, 1800 - (score / 15));
+    spawnTimer = this.time.delayedCall(nextDelay, spawnTarget, [], this);
+}
+
+function handleHit(container) {
+    const portrait = container.list[0]; // portrait is first element
+    const points = portrait.getData('points');
+    combo++;
+    if (combo > maxCombo) maxCombo = combo;
+
+    const comboMultiplier = Math.floor(combo / 5) + 1;
+    const gainedPoints = points * comboMultiplier;
+    score += gainedPoints;
+
+    // Play hit sound
+    playHitSound();
+
+    // Play combo sound if combo >= 2
+    if (combo >= 2) {
+        playComboSound(combo);
+    }
+
+    this.scoreText.setText(`SCORE: ${score}`);
+    if (combo > 1) {
+        this.comboText.setText(`x${combo} COMBO!`);
+        // Pop effect
+        this.tweens.add({
+            targets: this.comboText,
+            scale: 1.2,
+            duration: 100,
+            yoyo: true
+        });
+    }
+
+    // Particle burst
+    particles.emitParticleAt(container.x, container.y, 15);
+
+    // Floating text
+    const floatText = this.add.text(container.x, container.y, `+${gainedPoints}`, {
+        fontSize: '32px',
+        color: '#00A3E0',
+        fontStyle: 'bold'
+    }).setOrigin(0.5);
+
+    this.tweens.add({
+        targets: floatText,
+        y: container.y - 100,
+        alpha: 0,
+        duration: 800,
+        onComplete: () => floatText.destroy()
+    });
+
+    container.destroy();
+
+    // Small screen shake
+    this.cameras.main.shake(100, 0.005);
+}
+
+function handleMiss() {
+    combo = 0;
+    this.comboText.setText('');
+    
+    // Visual flash for miss
+    const flash = this.add.rectangle(600, 400, 1200, 800, 0xFF0000, 0.1);
+    this.time.delayedCall(50, () => flash.destroy());
+}
+
+function handleEscape(container) {
+    const portrait = container.list[0]; // portrait is first element
+    const isBonus = portrait.getData('type').isBonus;
+    container.destroy();
+
+    if (!isBonus) {
+        lives--;
+        let heartStr = '';
+        for(let i=0; i<lives; i++) heartStr += '❤️';
+        this.livesText.setText(heartStr || ' ');
+
+        // Play miss sound (target escaped)
+        playMissSound();
+
+        // Reset combo on escape
+        combo = 0;
+        this.comboText.setText('');
+
+        if (lives <= 0) {
+            endGame.call(this, 'GAME OVER');
+        }
+    }
+}
+
+function endGame(reason) {
+    gameActive = false;
+    if (spawnTimer) spawnTimer.remove();
+    if (countdownTimer) countdownTimer.remove();
+    targets.clear(true, true);
+
+    // Stop background music with fade out
+    stopBackgroundMusic(true);
+
+    // Play game over sound
+    playGameOverSound();
+
+    const isNewHigh = score > (parseInt(highscore) || 0);
+    if (isNewHigh) {
+        highscore = score;
+        localStorage.setItem('c9_highscore', highscore);
+        this.highScoreText.setText(`HIGH SCORE: ${highscore}`);
+    }
+
+    const overlay = this.add.rectangle(600, 400, 1200, 800, 0x000000, 0.85).setDepth(200);
+    const title = this.add.text(600, 250, reason, { fontSize: '80px', color: '#FF0000' }).setOrigin(0.5).setDepth(201);
+
+    if (isNewHigh) {
+        title.setText('NEW HIGH SCORE!');
+        title.setColor('#00A3E0');
+        // Fanfare effect
+        this.cameras.main.flash(1000, 0, 163, 224);
+    }
+
+    const scoreDisplay = this.add.text(600, 380, `FINAL SCORE: ${score}`, { fontSize: '48px', color: '#FFF' }).setOrigin(0.5).setDepth(201);
+    const highscoreDisplay = this.add.text(600, 450, `BEST: ${highscore}`, { fontSize: '24px', color: '#AAA' }).setOrigin(0.5).setDepth(201);
+
+    const restartBtn = this.add.rectangle(600, 580, 300, 80, 0x00A3E0).setInteractive().setDepth(201);
+    const restartText = this.add.text(600, 580, 'RESTART', { fontSize: '32px', color: '#FFF' }).setOrigin(0.5).setDepth(201);
+
+    restartBtn.on('pointerover', () => restartBtn.setFillStyle(0x0082B3));
+    restartBtn.on('pointerout', () => restartBtn.setFillStyle(0x00A3E0));
+
+    restartBtn.on('pointerdown', () => {
+        overlay.destroy();
+        title.destroy();
+        scoreDisplay.destroy();
+        highscoreDisplay.destroy();
+        restartBtn.destroy();
+        restartText.destroy();
+        startGame.call(this);
+    });
+}
+
+</script>
+</body>
+</html>
